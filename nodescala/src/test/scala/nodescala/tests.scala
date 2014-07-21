@@ -13,6 +13,7 @@ import org.scalatest._
 import NodeScala._
 import org.junit.runner.RunWith
 import org.scalatest.junit.JUnitRunner
+import java.util.NoSuchElementException
 
 @RunWith(classOf[JUnitRunner])
 class NodeScalaSuite extends FunSuite {
@@ -31,6 +32,156 @@ class NodeScalaSuite extends FunSuite {
       assert(false)
     } catch {
       case t: TimeoutException => // ok!
+    }
+  }
+
+  test("A list of successful futures") {
+    val range = (0 until 2)
+    val futures = (range map (i => Future{ Thread.sleep(100); i })).toList
+    val values = range.toList
+    val allFutures = Future.all(futures)
+    val res = Await.result(allFutures, 1 second)
+    assert(res == values)
+  }
+
+  test("A list with on failed") {
+    val range = (0 until 2)
+    val futures = (range map (i => Future{ Thread.sleep(1000); i })).toList
+    val values = range.toList
+
+    val failed = Future {
+      Thread.sleep(100)
+      throw new Exception("failed")
+    }
+    val withFailed = failed::futures
+    val allFutures = Future.all(withFailed)
+    try {
+      assert(Await.result(allFutures, 2 second) == values)
+      assert(false)
+    } catch {
+      case t: TimeoutException => // failed!
+        assert(false)
+      case e: Exception => // ok!
+        futures map (f => assert(f.isCompleted))
+    }
+  }
+
+  test("any first success") {
+    val quick_ok = Future{ true }
+    val slow_ok  = Future{ Thread.sleep(100); false }
+    val slow_ng  = Future{ Thread.sleep(100); throw new Exception("Sucks!") }
+    val futures = List(slow_ng, slow_ok, quick_ok)
+    val any = Future.any(futures)
+    try {
+      assert(Await.result(any, 1 second))
+    }
+  }
+
+  test("any first fail") {
+    val quick_ok = Future{ Thread.sleep(100); true }
+    val slow_ok  = Future{ Thread.sleep(100); false }
+    val slow_ng  = Future{ throw new Exception("Sucks!") }
+    val futures = List(slow_ng, slow_ok, quick_ok)
+    val any = Future.any(futures)
+    try {
+      assert(Await.result(any, 1 second))
+    } catch {
+      case t: TimeoutException => // failed!
+        assert(false)
+      case e: Exception => // ok!
+        assert(any.failed != null)
+    }
+  }
+
+  test("delay") {
+    val delayed = Future.delay(1 second)
+    try {
+      Await.result(delayed, 999 millisecond)
+      assert(false)
+    } catch {
+      case t: TimeoutException => // failed!
+        assert(true)
+      case e: Exception => // ok!
+        assert(false)
+    }
+  }
+
+  test("now completed ok") {
+    val ok = Future { true }
+    Thread.sleep(10)
+    assert(ok.now)
+  }
+
+  test("now completed fail") {
+    val failed = Future { throw new Exception("failed") }
+    Thread.sleep(10)
+    try {
+      failed.now
+    } catch {
+      case n : NoSuchElementException =>
+        assert(false, "it is already completed")
+      case e: Exception =>
+        assert(e.getMessage == "failed", "should be failed but got "+e.getMessage)
+    }
+  }
+
+  test("no completed yet") {
+    val notYet = Future { Thread.sleep(100); throw new Exception("failed") }
+    try {
+      notYet.now
+    } catch {
+      case n : NoSuchElementException =>
+        assert(true, "It isn't completed yet")
+      case e: Exception =>
+        assert(true, "should not have failed yet: "+e.getMessage)
+    }
+  }
+
+  test("continueWith successful future") {
+    val f = Future{ "something" }
+    val continued = f continueWith {
+      completed:Future[String] => completed.value match {
+        case Some(Success(r)) => r + "_continued"
+        case _ => "failed"
+      }
+    }
+    Await.result(continued, 100 millisecond)
+    assert(f.isCompleted)
+    continued.value match {
+      case Some(Success(r)) => assert(r == "something_continued")
+      case what => assert(false, what)
+    }
+  }
+
+  test("continueWith unsuccessful future") {
+    val f:Future[String] = Future{ throw new Exception("just because") }
+    val continued = f continueWith {
+      completed:Future[String] => completed.value match {
+        case Some(Success(r)) => r + "_continued"
+        case _ => "failed"
+      }
+    }
+    Await.result(continued, 100 millisecond)
+    assert(f.isCompleted)
+    continued.value match {
+      case Some(Success(r)) => assert(r == "failed")
+      case what => assert(false, what)
+    }
+  }
+
+  test("continue successful future ") {
+    val f = Future{ "something" }
+    val continued = f continue {
+      r => r match {
+        case Success(s) => s+"_success"
+        case Failure(e) => "failed"
+      }
+    }
+    Await.result(continued, 100 millisecond)
+    assert(f.isCompleted)
+    continued.value match {
+      case Some(Success(r)) => assert(r == "something_success")
+      case Some(Failure(e)) => assert(false)
     }
   }
 
