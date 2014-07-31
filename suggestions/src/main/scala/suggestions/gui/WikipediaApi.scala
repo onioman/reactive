@@ -9,9 +9,11 @@ import scala.concurrent.duration._
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.util.{ Try, Success, Failure }
 import rx.subscriptions.CompositeSubscription
-import rx.lang.scala.Observable
+import rx.lang.scala.{Notification, Observable}
 import observablex._
 import search._
+import rx.lang.scala.subjects.{ReplaySubject, AsyncSubject}
+import scala.collection._
 
 trait WikipediaApi {
 
@@ -37,7 +39,11 @@ trait WikipediaApi {
      *
      * E.g. `"erik", "erik meijer", "martin` should become `"erik", "erik_meijer", "martin"`
      */
-    def sanitized: Observable[String] = ???
+    def sanitized: Observable[String] = {
+      obs map { s =>
+        s.split(" ").mkString("_")
+      }
+    }
 
   }
 
@@ -48,7 +54,16 @@ trait WikipediaApi {
      *
      * E.g. `1, 2, 3, !Exception!` should become `Success(1), Success(2), Success(3), Failure(Exception), !TerminateStream!`
      */
-    def recovered: Observable[Try[T]] = ???
+    def recovered: Observable[Try[T]] = {
+      val subject = ReplaySubject[Try[T]]()
+      val notifications = obs.materialize
+      notifications subscribe { _ match {
+        case Notification.OnNext(t) => subject.onNext(Success(t))
+        case Notification.OnError(e) => subject.onNext(Failure(e)); subject.onCompleted()
+        case Notification.OnCompleted(_) => subject.onCompleted()
+      }}
+      subject
+    }
 
     /** Emits the events from the `obs` observable, until `totalSec` seconds have elapsed.
      *
@@ -56,7 +71,16 @@ trait WikipediaApi {
      *
      * Note: uses the existing combinators on observables.
      */
-    def timedOut(totalSec: Long): Observable[T] = ???
+    def timedOut(totalSec: Long): Observable[T] = {
+      val subject = ReplaySubject[T]()
+      val timer = Future{ Thread.sleep(totalSec*1000); subject.onCompleted() }
+      obs subscribe (
+        subject.onNext(_),
+        t => subject.onError(t),
+        () => subject.onCompleted()
+        )
+      subject
+    }
 
 
     /** Given a stream of events `obs` and a method `requestMethod` to map a request `T` into
@@ -84,7 +108,46 @@ trait WikipediaApi {
      *
      * Observable(Success(1), Succeess(1), Succeess(1), Succeess(2), Succeess(2), Succeess(2), Succeess(3), Succeess(3), Succeess(3))
      */
-    def concatRecovered[S](requestMethod: T => Observable[S]): Observable[Try[S]] = ???
+    def concatRecovered[S](requestMethod: T => Observable[S]): Observable[Try[S]] = {
+      val responses = ReplaySubject[Try[S]]()
+
+
+      var numRequest = 0
+      var numResponses = 0
+      var moreRequest = true
+
+      def toResponse(r: T) : Unit = {
+        val resposeSeq = requestMethod(r).recovered
+        resposeSeq.subscribe(
+          s => {
+            responses.onNext(s)
+          },
+          t => ???,
+          () => {
+            numResponses += 1
+            if (numResponses == numRequest &&
+              !moreRequest) responses.onCompleted()
+          }
+        )
+      }
+
+      val recoveredRequests = obs.recovered
+
+      recoveredRequests.subscribe(
+        t => { t match {
+          case Success(elem) =>
+            numRequest += 1
+            toResponse(elem)
+          case Failure(e) => responses.onNext(Failure(e))
+        }},
+        e => ???,
+        () => {
+          moreRequest = false
+          if (numResponses == numRequest) responses.onCompleted()
+        }
+        )
+      responses
+    }
 
   }
 
